@@ -1,1 +1,56 @@
 android-apk.yml
+name: Build Quest APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mixed-reality]
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply the mixed reality changes
+        run: patch -p1 < hito1y2-mr.patch
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK (build-tools and android-36 platform)
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36 build-tools;36.0.0"
+
+      - name: Android NDK r29
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          add-to-path: false
+
+      - name: Build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake
+
+      - name: Build libraries
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          chmod +x build_android.sh tools/*.sh
+          ./build_android.sh
+
+      - name: Package the APK
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: ./tools/package_apk.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GalaxyQuest-MR-apk
+          path: out/GalaxyQuest.apk

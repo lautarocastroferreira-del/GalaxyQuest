@@ -1,0 +1,192 @@
+diff -ruN -x build-android -x out -x third_party a/platform/src/gx/gl_renderer.cpp b/platform/src/gx/gl_renderer.cpp
+--- a/platform/src/gx/gl_renderer.cpp	2026-10-25 13:43:18.196492680 +0000
++++ b/platform/src/gx/gl_renderer.cpp	2026-10-25 13:43:19.337153220 +0000
+@@ -251,6 +251,7 @@
+     u32 boundTex[8];
+     bool inHud = false;
+     bool inSky = false;     // between sky markers: drawn around the game camera
++    bool mrTransparentClear = false;  // mixed reality eye: clears are see-through
+     bool inPlayer = false;  // between player markers
+     bool inPointer = false; // between pointer markers: the pointer's 2D cursor
+     // The shader key of the last draw, reused while nothing it depends on
+@@ -1740,6 +1741,7 @@
+             cc[3] = ((ar >> 8) & 0xFF) / 255.0f;
+             cc[1] = ((gb >> 8) & 0xFF) / 255.0f;
+             cc[2] = (gb & 0xFF) / 255.0f;
++            if (mrTransparentClear) cc[0] = cc[1] = cc[2] = cc[3] = 0.0f;
+             glClearColor(cc[0], cc[1], cc[2], cc[3]);
+             mask |= GL_COLOR_BUFFER_BIT;
+         }
+@@ -1755,6 +1757,7 @@
+ }
+ 
+ void Renderer::Impl::execute(EfbTarget& efb, const EyeView* eye, EfbTarget* hud, HudMode hudMode, Renderer& r) {
++    mrTransparentClear = eye && !eye->flatStereo && eye->clearTransparent;
+     const std::vector<Item>& items = cur->items;
+     const std::vector<std::shared_ptr<TexImage>>& textures = cur->frame->textures;
+     u32 nativeW = cur->nativeW, nativeH = cur->nativeH;
+@@ -1773,6 +1776,7 @@
+             eb.vrProj[i / 4][i % 4] = eye->proj[i];
+         }
+         eb.vrFlags[0] = 1;
++        eb.vrFlags[1] = eye->hideSky ? 1 : 0;
+         memcpy(eb.vrFocus, eye->focus, sizeof(eb.vrFocus));
+         memcpy(eb.vrCut, eye->cut, sizeof(eb.vrCut));
+         memcpy(eb.vrEyePos, eye->eyePos, sizeof(eb.vrEyePos));
+@@ -1818,7 +1822,7 @@
+         glDisable(GL_SCISSOR_TEST);
+         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+         glDepthMask(GL_TRUE);
+-        if (transparent) {
++        if (transparent || mrTransparentClear) {
+             glClearColor(0, 0, 0, 0);
+         } else {
+             glClearColor((clearAR & 255) / 255.0f, ((clearGB >> 8) & 255) / 255.0f, (clearGB & 255) / 255.0f, ((clearAR >> 8) & 255) / 255.0f);
+diff -ruN -x build-android -x out -x third_party a/platform/src/gx/gl_renderer.h b/platform/src/gx/gl_renderer.h
+--- a/platform/src/gx/gl_renderer.h	2026-10-25 13:43:18.196751423 +0000
++++ b/platform/src/gx/gl_renderer.h	2026-10-25 13:43:19.411872716 +0000
+@@ -55,6 +55,10 @@
+     // camera (view space origin) are lit from here instead.
+     float eyePos[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+     int index = 0;  // 0 = left, 1 = right: each eye keeps its own EFB copies
++    // Mixed reality: skies are not drawn and the picture is cleared see-through,
++    // so the headset's passthrough shows the room behind the game's world.
++    bool hideSky = false;
++    bool clearTransparent = false;
+     // One picture of a stereo pair of the flat view instead (view, proj and
+     // the cutaway are not used): the frame is replayed with the game's own
+     // camera, viewports and projection, and the 3D draws a VR eye would take
+diff -ruN -x build-android -x out -x third_party a/platform/src/gx/gl_shadergen.cpp b/platform/src/gx/gl_shadergen.cpp
+--- a/platform/src/gx/gl_shadergen.cpp	2026-10-25 13:43:18.196859930 +0000
++++ b/platform/src/gx/gl_shadergen.cpp	2026-10-25 13:43:19.416135840 +0000
+@@ -163,6 +163,7 @@
+     o.w("    vec4 e = vec4(dot(vrView[0].xyz, pos), dot(vrView[1].xyz, pos), dot(vrView[2].xyz, pos), 0.0);\n");
+     o.w("    clipPos = vec4(dot(vrProj[0], e), dot(vrProj[1], e), 0.0, dot(vrProj[3], e));\n");
+     o.w("    clipPos.z = clipPos.w * 0.99999;\n");
++    o.w("    if (vrFlags.y == 1) clipPos = vec4(2.0, 2.0, 2.0, 1.0);  // mixed reality: no sky\n");
+     if (u.cutaway) o.w("    v_eye = vec3(0.0, 0.0, 1.0e6);  // never cut\n");
+     o.w("  } else if (vrDraw) {\n");
+     o.w("    vec4 e = vec4(dot(vrView[0], v4), dot(vrView[1], v4), dot(vrView[2], v4), 1.0);\n");
+diff -ruN -x build-android -x out -x third_party a/platform/src/xr/vr_game.cpp b/platform/src/xr/vr_game.cpp
+--- a/platform/src/xr/vr_game.cpp	2026-10-25 13:43:18.203274835 +0000
++++ b/platform/src/xr/vr_game.cpp	2026-10-25 13:43:19.421667651 +0000
+@@ -419,6 +419,7 @@
+ bool sSharpen = false;        // AMD FidelityFX CAS in the composite
+ float sSharpness = 0.5f;      // its strength, 0..1
+ float sMinScale = 0.8f;       // lowest render scale (min_resolution)
++bool sMixed = false;           // mixed reality: Mario walks through your room (mixed_reality)
+ bool sGiantScreen = true;     // gameplay on the giant virtual screen (giant_screen; the default at first start)
+ bool sStereoScreen = false;   // the giant screen's picture as a stereo pair (stereo_screen)
+ float sStereoDepth = 1.75f;   // how far before the farthest things Mario is drawn, in eye distances (stereo_depth)
+@@ -928,6 +929,7 @@
+     {"super_resolution", 0.0f, 1.0f, 0.0f, FLAG(sSuperRes)},
+     {"sharpening", 0.0f, 1.0f, 0.0f, FLAG(sSharpen)},
+     {"sharpening_strength", 0.0f, 1.0f, 0.0f, NUMBER(sSharpness)},
++    {"mixed_reality", 0.0f, 1.0f, 0.0f, FLAG(sMixed)},
+     {"giant_screen", 0.0f, 1.0f, 0.0f, FLAG(sGiantScreen)},
+     {"screen_distance", 1.0f, 20.0f, 0.0f, NUMBER(sScreenDistance)},
+     {"screen_tilt", -45.0f, 90.0f, 0.0f, NUMBER(sScreenTilt)},
+@@ -1028,7 +1030,7 @@
+ bool invertCamera() { return sInvertCamera; }
+ float spinShakeSpeed() { return 2.5f * sSpinShakeStrength; }
+ float viewTilt() { return sGiantScreen ? sScreenTilt : sDioramaTilt; }
+-bool passthroughWanted() { return sPassthrough && sGiantScreen; }
++bool passthroughWanted() { return sMixed || (sPassthrough && sGiantScreen); }
+ float passthroughShown() { return sPassAmount; }
+ bool passthroughAvailable() { return sPassAvailable; }
+ void setPassthroughAvailable(bool available) { sPassAvailable = available; }
+@@ -1527,7 +1529,7 @@
+         sLastFrame = r.frameNumber();
+     }
+     sUploadNs = port_host_time_ns() - frameStartNs;
+-    bool wantVr = r.hasFrame() && r.camera().valid && (r.camera().flags & PORT_GX_CAMERA_DIORAMA) && !sGiantScreen;
++    bool wantVr = r.hasFrame() && r.camera().valid && (r.camera().flags & PORT_GX_CAMERA_DIORAMA) && (!sGiantScreen || sMixed);
+     // Presentation changes happen at the darkest point of a fade.
+     if (wantVr != sShownVrMode && !sFadingOut && sFade <= 0.0f) {
+         sFadingOut = true;
+@@ -1549,11 +1551,12 @@
+     sDioramaShown.store(sVrMode ? 1 : 0);
+     // The room around the giant screen (passthrough) fades in and out with
+     // the setting; the diorama fills the view itself.
+-    float room = sPassthrough && sPassAvailable && sGiantScreen && !sShownVrMode ? 1.0f : 0.0f;
++    float room = ((sMixed && sPassAvailable) || (sPassthrough && sPassAvailable && sGiantScreen && !sShownVrMode)) ? 1.0f : 0.0f;
+     sPassAmount = room > sPassAmount ? fminf(room, sPassAmount + dt / 0.3f) : fmaxf(room, sPassAmount - dt / 0.3f);
+     if (sVrMode) {
+         bool wasValid = sRig.valid;
+         xm::Vec3 prevPivot = sRig.pivot;
++        sRigParams.roomLocked = sMixed;
+         sStageFromView = updateRig(sRig, sRigParams, r.camera(), dt);
+         static const bool sRigLog = getenv("PETARI_RIGLOG") != nullptr;
+         if (sRigLog && wasValid && (sRig.snapped || sRig.turnRate > 1.0f)) {
+@@ -1657,6 +1660,8 @@
+         }
+         gpu::EyeView ev;
+         ev.index = eye;
++        ev.hideSky = sMixed;
++        ev.clearTransparent = sMixed;
+         xm::Mat4 eyeFromView = ei.view * sStageFromView;
+         toRowMajor(eyeFromView, ev.view);
+         toRowMajor(ei.proj, ev.proj);
+diff -ruN -x build-android -x out -x third_party a/platform/src/xr/vr_rig.cpp b/platform/src/xr/vr_rig.cpp
+--- a/platform/src/xr/vr_rig.cpp	2026-10-25 13:43:18.203465970 +0000
++++ b/platform/src/xr/vr_rig.cpp	2026-10-25 13:43:19.422062626 +0000
+@@ -88,6 +88,28 @@
+     }
+     rig.centred = centre;
+ 
++    if (params.roomLocked) {
++        // Mixed reality: the world is fixed in the player's room.  The pivot
++        // is set once (where Mario starts), and then neither Mario's moves,
++        // gravity nor the game camera move or turn it: Mario walks through
++        // the room, the player walks round him.
++        if (!rig.valid) {
++            rig.pivot = centre ? vec(cam.player) : target;
++            rig.up = up;
++            rig.forward = fwd;
++            rig.recentUp = up;
++            rig.lastPlayer = rig.pivot;
++            rig.lift = 0.0f;
++            rig.valid = true;
++        }
++        if (rig.pendingTurn != 0.0f) {
++            rig.forward = xm::normalize(flatten(turn(rig.forward, rig.up, rig.pendingTurn), rig.up));
++        }
++        rig.pendingTurn = 0.0f;
++        rig.snapped = false;
++        rig.turnRate = 0.0f;
++        rig.centred = centre;
++    } else {
+     bool cut = !rig.valid || xm::length(target - rig.pivot) > params.snapDistance;
+     // A sudden change of gravity (a gravity switch, walking over the edge of
+     // a box-shaped room) or a snap turn: done at once behind a blink (the
+@@ -169,6 +191,8 @@
+         rig.turnRate = 0.0f;
+     }
+ 
++    }
++
+     // Stage-from-world: world axes (right, up, back) -> stage X, Y, Z, scaled,
+     // with the pivot at the anchor.
+     xm::Vec3 r = xm::normalize(xm::cross(rig.forward, rig.up));
+diff -ruN -x build-android -x out -x third_party a/platform/src/xr/vr_rig.h b/platform/src/xr/vr_rig.h
+--- a/platform/src/xr/vr_rig.h	2026-10-25 13:43:18.203561848 +0000
++++ b/platform/src/xr/vr_rig.h	2026-10-25 13:43:19.422290669 +0000
+@@ -31,6 +31,7 @@
+     bool turnWithCamera = false;             // the old way: the yaw follows the game camera, smoothed
+     float jumpDeadZone = 350.0f;             // game units Mario rises off the ground before the world follows
+     float landingHalfLife = 0.25f;           // seconds: back on Mario after landing
++    bool roomLocked = false;                 // mixed reality: the world is fixed in the room, nothing follows Mario
+ };
+ 
+ struct RigState {
+diff -ruN -x build-android -x out -x third_party a/platform/src/xr/vr_settings.cpp b/platform/src/xr/vr_settings.cpp
+--- a/platform/src/xr/vr_settings.cpp	2026-10-25 13:43:18.203679393 +0000
++++ b/platform/src/xr/vr_settings.cpp	2026-10-25 13:43:19.422568429 +0000
+@@ -163,6 +163,7 @@
+ }
+ 
+ const Item kScreenItems[] = {
++    {"mixed_reality", "Mixed reality", "Mario walks through your room (passthrough)", kSwitch},
+     {"giant_screen", "Giant screen", "Play on a big screen, no diorama", kSwitch},
+     {"screen_distance", "Screen distance", "How far away the giant screen is", kSlider, 2.5f, 10.0f, 0.5f, "%.1f m", giantOn},
+     {"screen_tilt", "View tilt", nullptr, kStepper, -20.0f, 90.0f, 5.0f, nullptr, giantOn, hintScreenTilt, nullptr, tiltText},

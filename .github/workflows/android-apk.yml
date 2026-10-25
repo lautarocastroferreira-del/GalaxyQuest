@@ -1,10 +1,7 @@
-
 name: Build Quest APK
 
 on:
   workflow_dispatch:
-  push:
-    branches: [mixed-reality]
 
 permissions:
   contents: read
@@ -17,6 +14,22 @@ jobs:
 
       - name: Apply the mixed reality changes
         run: patch -p1 < hito1y2-mr.patch
+
+      - name: Fix renderer member (needed by the first version of the patch)
+        run: |
+          python3 - <<'PY'
+          p = 'platform/src/gx/gl_renderer.cpp'
+          s = open(p).read()
+          line = "    bool mrTransparentClear = false;  // mixed reality eye: clears are see-through\n"
+          head = "struct Renderer::Impl {\n"
+          if line in s and (head + line) not in s:
+              s = s.replace(line, "", 1)
+              s = s.replace(head, head + line, 1)
+              open(p, 'w').write(s)
+              print("moved mrTransparentClear into Renderer::Impl")
+          else:
+              print("nothing to fix")
+          PY
 
       - uses: actions/setup-java@v4
         with:
@@ -42,8 +55,17 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
+          set -o pipefail
           chmod +x build_android.sh tools/*.sh
-          ./build_android.sh
+          ./build_android.sh 2>&1 | tee build.log
+
+      - name: Show the first errors (only if the build failed)
+        if: failure()
+        run: |
+          echo "=== FIRST ERRORS ==="
+          grep -n -m 6 -B 2 -A 8 -E "error:|FAILED:|undefined reference" build.log || echo "no 'error:' lines found"
+          echo "=== LAST 40 LINES ==="
+          tail -n 40 build.log
 
       - name: Package the APK
         env:
